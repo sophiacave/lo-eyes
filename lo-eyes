@@ -41,6 +41,8 @@ def _slug(url: str) -> str:
 
 
 def _url(path: str) -> str:
+    if path.startswith(("http://", "https://")):
+        return path.rstrip("/") + "/" if not path.endswith("/") else path
     p = path if path.startswith("/") else f"/{path.lstrip('/')}"
     return f"{BASE_URL}{p}"
 
@@ -201,10 +203,13 @@ def audit(url: str):
                     }
                 });
 
-                // 3. Touch targets < 44px
-                document.querySelectorAll('a, button, input, select, textarea, [role=button]').forEach(el => {
+                // 3. Touch targets < 44px (skip inline text links in body content)
+                document.querySelectorAll('button, input, select, textarea, [role=button], a[class]').forEach(el => {
                     const rect = el.getBoundingClientRect();
                     if (rect.height > 0 && rect.height < 44 && rect.width > 0) {
+                        const display = getComputedStyle(el).display;
+                        if (el.tagName === 'A' && display === 'inline') return;
+                        if (el.tagName === 'INPUT' && (el.type === 'range' || el.type === 'hidden')) return;
                         const tag = el.tagName.toLowerCase();
                         const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
                         const text = el.textContent.trim().substring(0, 25);

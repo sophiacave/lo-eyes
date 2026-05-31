@@ -51,6 +51,8 @@ def _slug(url: str) -> str:
 
 
 def _url(path: str) -> str:
+    if path.startswith(("http://", "https://")):
+        return path.rstrip("/") + "/" if not path.endswith("/") else path
     p = path if path.startswith("/") else f"/{path.lstrip('/')}"
     return f"{BASE_URL}{p}"
 
