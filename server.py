@@ -58,10 +58,12 @@ def _url(path: str) -> str:
 
 
 def _run_audit_js():
-    """JavaScript audit code injected into pages."""
+    """JavaScript audit code injected into pages. 9 WCAG checks."""
     return """() => {
         const vw = window.innerWidth;
         const issues = [];
+
+        // === RESPONSIVE CHECKS ===
 
         // 1. Overflow (skip elements clipped by scroll parents)
         document.querySelectorAll('*').forEach(el => {
@@ -111,6 +113,8 @@ def _run_audit_js():
             }
         });
 
+        // === WCAG STRUCTURE CHECKS ===
+
         // 4. Heading hierarchy
         const headings = [];
         document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(el => {
@@ -123,13 +127,114 @@ def _run_audit_js():
             }
         }
 
+        // 5. Missing lang attribute (WCAG 3.1.1)
+        if (!document.documentElement.lang) {
+            issues.push({ type: 'missing-lang', severity: 'high',
+                detail: 'html element missing lang attribute' });
+        }
+
+        // 6. Missing landmarks (WCAG 1.3.1) — check for main, nav, header
+        if (!document.querySelector('main, [role=main]')) {
+            issues.push({ type: 'missing-landmark', severity: 'medium',
+                detail: 'no <main> landmark found' });
+        }
+
+        // 7. Images missing alt text (WCAG 1.1.1)
+        document.querySelectorAll('img').forEach(el => {
+            if (!el.hasAttribute('alt') && !el.getAttribute('role')?.includes('presentation')) {
+                const src = el.src ? el.src.split('/').pop().substring(0, 30) : 'unknown';
+                issues.push({ type: 'missing-alt', severity: 'high',
+                    detail: `img "${src}" missing alt attribute` });
+            }
+        });
+
+        // 8. Buttons/links without accessible name (WCAG 4.1.2)
+        document.querySelectorAll('button, a[href], [role=button]').forEach(el => {
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return;
+            const text = el.textContent.trim();
+            const aria = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || '';
+            const title = el.getAttribute('title') || '';
+            const imgAlt = el.querySelector('img[alt]')?.alt || '';
+            if (!text && !aria && !title && !imgAlt) {
+                const tag = el.tagName.toLowerCase();
+                const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                issues.push({ type: 'missing-name', severity: 'high',
+                    detail: `${tag}${cls} has no accessible name` });
+            }
+        });
+
+        // 9. Contrast ratio (WCAG 1.4.3) — sample key text elements
+        function srgbToLinear(c) { return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+        function luminance(r, g, b) {
+            return 0.2126 * srgbToLinear(r/255) + 0.7152 * srgbToLinear(g/255) + 0.0722 * srgbToLinear(b/255);
+        }
+        function parseColor(str) {
+            const m = str.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
+            if (!m) return null;
+            return { r: +m[1], g: +m[2], b: +m[3], a: str.includes('rgba') ? parseFloat(str.split(',')[3]) : 1 };
+        }
+        function getEffectiveBg(el) {
+            // Composite semi-transparent backgrounds down the stack
+            let layers = [];
+            let node = el;
+            while (node && node !== document.documentElement) {
+                const bg = getComputedStyle(node).backgroundColor;
+                const c = parseColor(bg);
+                if (c && c.a > 0.01) layers.push(c);
+                if (c && c.a >= 0.99) break;
+                node = node.parentElement;
+            }
+            let bg = { r: 0, g: 0, b: 0 };
+            for (let i = layers.length - 1; i >= 0; i--) {
+                const l = layers[i];
+                bg.r = Math.round(l.a * l.r + (1 - l.a) * bg.r);
+                bg.g = Math.round(l.a * l.g + (1 - l.a) * bg.g);
+                bg.b = Math.round(l.a * l.b + (1 - l.a) * bg.b);
+            }
+            return bg;
+        }
+        function contrastRatio(fg, bg) {
+            const l1 = luminance(fg.r, fg.g, fg.b);
+            const l2 = luminance(bg.r, bg.g, bg.b);
+            const lighter = Math.max(l1, l2);
+            const darker = Math.min(l1, l2);
+            return (lighter + 0.05) / (darker + 0.05);
+        }
+
+        // Sample up to 20 visible text elements for contrast
+        const textEls = Array.from(document.querySelectorAll('h1,h2,h3,p,span,a,li,label,button'))
+            .filter(el => {
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0 && el.textContent.trim().length > 0 && el.children.length === 0;
+            }).slice(0, 20);
+
+        textEls.forEach(el => {
+            const cs = getComputedStyle(el);
+            const fg = parseColor(cs.color);
+            if (!fg) return;
+            const bg = getEffectiveBg(el);
+            const ratio = contrastRatio(fg, bg);
+            const size = parseFloat(cs.fontSize);
+            const bold = parseInt(cs.fontWeight) >= 700;
+            const isLarge = size >= 18 || (size >= 14 && bold);
+            const minRatio = isLarge ? 3 : 4.5;
+            if (ratio < minRatio) {
+                const tag = el.tagName.toLowerCase();
+                const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                const text = el.textContent.trim().substring(0, 20);
+                issues.push({ type: 'low-contrast', severity: 'high',
+                    detail: `${tag}${cls} "${text}" ratio ${ratio.toFixed(1)}:1 (min ${minRatio}:1)` });
+            }
+        });
+
         // Deduplicate
         const seen = new Set();
         return issues.filter(i => {
             const k = i.type + ':' + i.detail;
             if (seen.has(k)) return false;
             seen.add(k); return true;
-        }).slice(0, 15);
+        }).slice(0, 25);
     }"""
 
 

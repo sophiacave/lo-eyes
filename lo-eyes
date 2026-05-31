@@ -47,6 +47,177 @@ def _url(path: str) -> str:
     return f"{BASE_URL}{p}"
 
 
+def _audit_js():
+    """9-check WCAG + responsive audit injected into pages."""
+    return r"""() => {
+        const vw = window.innerWidth;
+        const issues = [];
+
+        // === RESPONSIVE CHECKS ===
+
+        // 1. Overflow (skip elements clipped by scroll parents)
+        document.querySelectorAll('*').forEach(el => {
+            const rect = el.getBoundingClientRect();
+            if (rect.right > vw + 1 && rect.width > 0) {
+                let parent = el.parentElement, clipped = false;
+                while (parent) {
+                    const ov = getComputedStyle(parent).overflowX;
+                    if (ov === 'auto' || ov === 'hidden' || ov === 'scroll') {
+                        const pr = parent.getBoundingClientRect();
+                        if (pr.right <= vw + 1) { clipped = true; break; }
+                    }
+                    parent = parent.parentElement;
+                }
+                if (!clipped) {
+                    const tag = el.tagName.toLowerCase();
+                    const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                    issues.push({ type: 'overflow', severity: 'high',
+                        detail: `${tag}${cls} overflows by ${Math.round(rect.right - vw)}px` });
+                }
+            }
+        });
+
+        // 2. Small fonts (leaf text nodes only)
+        document.querySelectorAll('p, span, a, li, td, th, label, button').forEach(el => {
+            const size = parseFloat(getComputedStyle(el).fontSize);
+            if (size < 12 && el.textContent.trim().length > 0 && el.children.length === 0) {
+                const tag = el.tagName.toLowerCase();
+                const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                issues.push({ type: 'small-font', severity: 'medium',
+                    detail: `${tag}${cls} ${size}px (min 12px)` });
+            }
+        });
+
+        // 3. Touch targets < 44px
+        document.querySelectorAll('button, input, select, textarea, [role=button], a[class]').forEach(el => {
+            const rect = el.getBoundingClientRect();
+            if (rect.height > 0 && rect.height < 44 && rect.width > 0) {
+                const display = getComputedStyle(el).display;
+                if (el.tagName === 'A' && display === 'inline') return;
+                if (el.tagName === 'INPUT' && (el.type === 'range' || el.type === 'hidden')) return;
+                const tag = el.tagName.toLowerCase();
+                const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                const text = el.textContent.trim().substring(0, 25);
+                issues.push({ type: 'touch-target', severity: 'medium',
+                    detail: `${tag}${cls} "${text}" ${Math.round(rect.height)}px (min 44px)` });
+            }
+        });
+
+        // === WCAG STRUCTURE CHECKS ===
+
+        // 4. Heading hierarchy
+        const headings = [];
+        document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(el => {
+            headings.push(parseInt(el.tagName[1]));
+        });
+        for (let i = 1; i < headings.length; i++) {
+            if (headings[i] > headings[i-1] + 1) {
+                issues.push({ type: 'heading-skip', severity: 'medium',
+                    detail: `h${headings[i-1]} -> h${headings[i]} (skips level)` });
+            }
+        }
+
+        // 5. Missing lang attribute (WCAG 3.1.1)
+        if (!document.documentElement.lang) {
+            issues.push({ type: 'missing-lang', severity: 'high',
+                detail: 'html element missing lang attribute' });
+        }
+
+        // 6. Missing landmarks (WCAG 1.3.1)
+        if (!document.querySelector('main, [role=main]')) {
+            issues.push({ type: 'missing-landmark', severity: 'medium',
+                detail: 'no <main> landmark found' });
+        }
+
+        // 7. Images missing alt text (WCAG 1.1.1)
+        document.querySelectorAll('img').forEach(el => {
+            if (!el.hasAttribute('alt') && !(el.getAttribute('role') || '').includes('presentation')) {
+                const src = el.src ? el.src.split('/').pop().substring(0, 30) : 'unknown';
+                issues.push({ type: 'missing-alt', severity: 'high',
+                    detail: `img "${src}" missing alt attribute` });
+            }
+        });
+
+        // 8. Buttons/links without accessible name (WCAG 4.1.2)
+        document.querySelectorAll('button, a[href], [role=button]').forEach(el => {
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return;
+            const text = el.textContent.trim();
+            const aria = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || '';
+            const title = el.getAttribute('title') || '';
+            const imgAlt = (el.querySelector('img[alt]') || {}).alt || '';
+            if (!text && !aria && !title && !imgAlt) {
+                const tag = el.tagName.toLowerCase();
+                const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                issues.push({ type: 'missing-name', severity: 'high',
+                    detail: `${tag}${cls} has no accessible name` });
+            }
+        });
+
+        // 9. Contrast ratio (WCAG 1.4.3)
+        function srgb(c) { return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+        function lum(r, g, b) { return 0.2126 * srgb(r/255) + 0.7152 * srgb(g/255) + 0.0722 * srgb(b/255); }
+        function parseC(s) {
+            const m = s.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+            if (!m) return null;
+            return { r: +m[1], g: +m[2], b: +m[3], a: s.includes('rgba') ? parseFloat(s.split(',')[3]) : 1 };
+        }
+        function getBg(el) {
+            // Composite semi-transparent backgrounds down the stack
+            let layers = [];
+            let n = el;
+            while (n && n !== document.documentElement) {
+                const c = parseC(getComputedStyle(n).backgroundColor);
+                if (c && c.a > 0.01) layers.push(c);
+                if (c && c.a >= 0.99) break;
+                n = n.parentElement;
+            }
+            // Start from bottom (darkest parent) and composite up
+            let bg = { r: 0, g: 0, b: 0 };
+            for (let i = layers.length - 1; i >= 0; i--) {
+                const l = layers[i];
+                bg.r = Math.round(l.a * l.r + (1 - l.a) * bg.r);
+                bg.g = Math.round(l.a * l.g + (1 - l.a) * bg.g);
+                bg.b = Math.round(l.a * l.b + (1 - l.a) * bg.b);
+            }
+            return bg;
+        }
+        function cr(fg, bg) {
+            const l1 = lum(fg.r, fg.g, fg.b), l2 = lum(bg.r, bg.g, bg.b);
+            return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+        }
+        Array.from(document.querySelectorAll('h1,h2,h3,p,span,a,li,label,button'))
+            .filter(el => {
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0 && el.textContent.trim().length > 0 && el.children.length === 0;
+            }).slice(0, 20).forEach(el => {
+                const cs = getComputedStyle(el);
+                const fg = parseC(cs.color);
+                if (!fg) return;
+                const bg = getBg(el);
+                const ratio = cr(fg, bg);
+                const sz = parseFloat(cs.fontSize);
+                const bold = parseInt(cs.fontWeight) >= 700;
+                const minR = (sz >= 18 || (sz >= 14 && bold)) ? 3 : 4.5;
+                if (ratio < minR) {
+                    const tag = el.tagName.toLowerCase();
+                    const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                    const text = el.textContent.trim().substring(0, 20);
+                    issues.push({ type: 'low-contrast', severity: 'high',
+                        detail: `${tag}${cls} "${text}" ratio ${ratio.toFixed(1)}:1 (min ${minR}:1)` });
+                }
+            });
+
+        // Deduplicate
+        const seen = new Set();
+        return issues.filter(i => {
+            const k = i.type + ':' + i.detail;
+            if (seen.has(k)) return false;
+            seen.add(k); return true;
+        }).slice(0, 25);
+    }"""
+
+
 def scan(url: str, device: str = "iphone-14", overlap: int = 60):
     """Auto-chunk full page into viewport-sized pieces. Every detail visible.
 
@@ -166,66 +337,7 @@ def audit(url: str):
             page = context.new_page()
             page.goto(_url(url), wait_until="networkidle", timeout=15000)
 
-            found = page.evaluate("""() => {
-                const vw = window.innerWidth;
-                const issues = [];
-
-                // 1. Overflow (skip elements clipped by scroll parents)
-                document.querySelectorAll('*').forEach(el => {
-                    const rect = el.getBoundingClientRect();
-                    if (rect.right > vw + 1 && rect.width > 0) {
-                        let parent = el.parentElement, clipped = false;
-                        while (parent) {
-                            const ov = getComputedStyle(parent).overflowX;
-                            if (ov === 'auto' || ov === 'hidden' || ov === 'scroll') {
-                                const pr = parent.getBoundingClientRect();
-                                if (pr.right <= vw + 1) { clipped = true; break; }
-                            }
-                            parent = parent.parentElement;
-                        }
-                        if (!clipped) {
-                            const tag = el.tagName.toLowerCase();
-                            const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
-                            issues.push({ type: 'overflow', severity: 'high',
-                                detail: `${tag}${cls} overflows by ${Math.round(rect.right - vw)}px` });
-                        }
-                    }
-                });
-
-                // 2. Small fonts (leaf text nodes only)
-                document.querySelectorAll('p, span, a, li, td, th, label, button').forEach(el => {
-                    const size = parseFloat(getComputedStyle(el).fontSize);
-                    if (size < 12 && el.textContent.trim().length > 0 && el.children.length === 0) {
-                        const tag = el.tagName.toLowerCase();
-                        const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
-                        issues.push({ type: 'small-font', severity: 'medium',
-                            detail: `${tag}${cls} ${size}px (min 12px)` });
-                    }
-                });
-
-                // 3. Touch targets < 44px (skip inline text links in body content)
-                document.querySelectorAll('button, input, select, textarea, [role=button], a[class]').forEach(el => {
-                    const rect = el.getBoundingClientRect();
-                    if (rect.height > 0 && rect.height < 44 && rect.width > 0) {
-                        const display = getComputedStyle(el).display;
-                        if (el.tagName === 'A' && display === 'inline') return;
-                        if (el.tagName === 'INPUT' && (el.type === 'range' || el.type === 'hidden')) return;
-                        const tag = el.tagName.toLowerCase();
-                        const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
-                        const text = el.textContent.trim().substring(0, 25);
-                        issues.push({ type: 'touch-target', severity: 'medium',
-                            detail: `${tag}${cls} "${text}" ${Math.round(rect.height)}px (min 44px)` });
-                    }
-                });
-
-                // Deduplicate
-                const seen = new Set();
-                return issues.filter(i => {
-                    const k = i.type + ':' + i.detail;
-                    if (seen.has(k)) return false;
-                    seen.add(k); return true;
-                }).slice(0, 10);
-            }""")
+            found = page.evaluate(_audit_js())
 
             if found:
                 for issue in found:
