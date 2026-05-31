@@ -96,10 +96,13 @@ def _run_audit_js():
             }
         });
 
-        // 3. Touch targets < 44px (buttons and block-level links only, not inline text links)
+        // 3. Touch targets < 44px (skip inline text links and range/hidden inputs)
         document.querySelectorAll('button, input, select, textarea, [role=button], a[class]').forEach(el => {
             const rect = el.getBoundingClientRect();
             if (rect.height > 0 && rect.height < 44 && rect.width > 0) {
+                const display = getComputedStyle(el).display;
+                if (el.tagName === 'A' && display === 'inline') return;
+                if (el.tagName === 'INPUT' && (el.type === 'range' || el.type === 'hidden')) return;
                 const tag = el.tagName.toLowerCase();
                 const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
                 const text = el.textContent.trim().substring(0, 25);
