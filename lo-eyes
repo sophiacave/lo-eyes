@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""lo-eyes — Visual frontend inspector for likeone.ai
+
+Modes:
+  screenshot  — single viewport capture (readable)
+  scan        — auto-chunk full page into viewport-sized pieces (readable + complete)
+  audit       — responsive + a11y checks across all viewports
+  responsive  — viewport screenshots at all 5 devices
+"""
+
+import argparse
+import sys
+import json
+from datetime import datetime
+from pathlib import Path
+
+VENV = Path(__file__).parent / ".venv"
+if VENV.exists():
+    site_packages = list((VENV / "lib").glob("python*/site-packages"))
+    if site_packages:
+        sys.path.insert(0, str(site_packages[0]))
+
+from playwright.sync_api import sync_playwright
+
+BASE_URL = "https://likeone.ai"
+SCREENSHOT_DIR = Path(__file__).parent / "screenshots"
+SCREENSHOT_DIR.mkdir(exist_ok=True)
+
+DEVICES = {
+    "iphone-se": {"width": 375, "height": 667, "scale": 1, "mobile": True},
+    "iphone-14": {"width": 390, "height": 844, "scale": 1, "mobile": True},
+    "ipad": {"width": 768, "height": 1024, "scale": 1, "mobile": True},
+    "laptop": {"width": 1280, "height": 800, "scale": 1, "mobile": False},
+    "desktop": {"width": 1440, "height": 900, "scale": 1, "mobile": False},
+}
+
+
+def _slug(url: str) -> str:
+    path = url if url.startswith("/") else f"/{url.lstrip('/')}"
+    return "home" if path == "/" else path.strip("/").replace("/", "-")
+
+
+def _url(path: str) -> str:
+    p = path if path.startswith("/") else f"/{path.lstrip('/')}"
+    return f"{BASE_URL}{p}"
+
+
+def scan(url: str, device: str = "iphone-14", overlap: int = 60):
+    """Auto-chunk full page into viewport-sized pieces. Every detail visible.
+
+    Each chunk overlaps by `overlap` px so nothing falls between folds.
+    Outputs a manifest JSON for RAG indexing.
+    """
+    config = DEVICES[device]
+    slug = _slug(url)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    scan_dir = SCREENSHOT_DIR / f"{slug}_{device}_{ts}"
+    scan_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": config["width"], "height": config["height"]},
+            device_scale_factor=1,
+            is_mobile=config.get("mobile", False),
+        )
+        page = context.new_page()
+        page.goto(_url(url), wait_until="networkidle", timeout=20000)
+        page.wait_for_timeout(800)
+
+        # Get full page height
+        page_height = page.evaluate("() => document.body.scrollHeight")
+        vh = config["height"]
+        step = vh - overlap
+        folds = max(1, (page_height + step - 1) // step)
+
+        print(f"  Page: {url}")
+        print(f"  Device: {device} ({config['width']}x{config['height']})")
+        print(f"  Page height: {page_height}px → {folds} chunks")
+        print(f"  Output: {scan_dir.name}/")
+        print()
+
+        manifest = {
+            "url": url,
+            "device": device,
+            "viewport": f"{config['width']}x{config['height']}",
+            "page_height": page_height,
+            "folds": folds,
+            "timestamp": ts,
+            "chunks": [],
+        }
+
+        for i in range(folds):
+            y = i * step
+            page.evaluate(f"window.scrollTo(0, {y})")
+            page.wait_for_timeout(300)
+
+            filename = f"chunk_{i+1:02d}.png"
+            filepath = scan_dir / filename
+            page.screenshot(path=str(filepath), full_page=False)
+
+            chunk_info = {
+                "file": filename,
+                "fold": i + 1,
+                "scroll_y": y,
+                "viewport_top": y,
+                "viewport_bottom": min(y + vh, page_height),
+            }
+            manifest["chunks"].append(chunk_info)
+            print(f"  [{i+1}/{folds}] y={y}px → {filename}")
+
+        # Save manifest
+        manifest_path = scan_dir / "manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+
+        context.close()
+        browser.close()
+
+    print(f"\n  {folds} chunks + manifest.json saved to {scan_dir}")
+    return str(scan_dir)
+
+
+def screenshot(url: str, device: str = "all", full_page: bool = False):
+    """Single viewport screenshot (or all devices)."""
+    slug = _slug(url)
+    devices_to_use = DEVICES if device == "all" else {device: DEVICES[device]}
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        for dev_name, config in devices_to_use.items():
+            context = browser.new_context(
+                viewport={"width": config["width"], "height": config["height"]},
+                device_scale_factor=1,
+                is_mobile=config.get("mobile", False),
+            )
+            page = context.new_page()
+            page.goto(_url(url), wait_until="networkidle", timeout=15000)
+            page.wait_for_timeout(500)
+
+            filename = f"{slug}_{dev_name}_{ts}.png"
+            filepath = SCREENSHOT_DIR / filename
+            page.screenshot(path=str(filepath), full_page=full_page)
+            mode = "full-page" if full_page else f"{config['width']}x{config['height']}"
+            print(f"  {dev_name:<12} {mode}  → {filename}")
+            context.close()
+        browser.close()
+    print(f"\nSaved to {SCREENSHOT_DIR}")
+
+
+def audit(url: str):
+    """Responsive + a11y audit across all viewports."""
+    issues = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        for dev_name, config in DEVICES.items():
+            context = browser.new_context(
+                viewport={"width": config["width"], "height": config["height"]},
+                device_scale_factor=1,
+                is_mobile=config.get("mobile", False),
+            )
+            page = context.new_page()
+            page.goto(_url(url), wait_until="networkidle", timeout=15000)
+
+            found = page.evaluate("""() => {
+                const vw = window.innerWidth;
+                const issues = [];
+
+                // 1. Overflow (skip elements clipped by scroll parents)
+                document.querySelectorAll('*').forEach(el => {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.right > vw + 1 && rect.width > 0) {
+                        let parent = el.parentElement, clipped = false;
+                        while (parent) {
+                            const ov = getComputedStyle(parent).overflowX;
+                            if (ov === 'auto' || ov === 'hidden' || ov === 'scroll') {
+                                const pr = parent.getBoundingClientRect();
+                                if (pr.right <= vw + 1) { clipped = true; break; }
+                            }
+                            parent = parent.parentElement;
+                        }
+                        if (!clipped) {
+                            const tag = el.tagName.toLowerCase();
+                            const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                            issues.push({ type: 'overflow', severity: 'high',
+                                detail: `${tag}${cls} overflows by ${Math.round(rect.right - vw)}px` });
+                        }
+                    }
+                });
+
+                // 2. Small fonts (leaf text nodes only)
+                document.querySelectorAll('p, span, a, li, td, th, label, button').forEach(el => {
+                    const size = parseFloat(getComputedStyle(el).fontSize);
+                    if (size < 12 && el.textContent.trim().length > 0 && el.children.length === 0) {
+                        const tag = el.tagName.toLowerCase();
+                        const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                        issues.push({ type: 'small-font', severity: 'medium',
+                            detail: `${tag}${cls} ${size}px (min 12px)` });
+                    }
+                });
+
+                // 3. Touch targets < 44px
+                document.querySelectorAll('a, button, input, select, textarea, [role=button]').forEach(el => {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.height > 0 && rect.height < 44 && rect.width > 0) {
+                        const tag = el.tagName.toLowerCase();
+                        const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                        const text = el.textContent.trim().substring(0, 25);
+                        issues.push({ type: 'touch-target', severity: 'medium',
+                            detail: `${tag}${cls} "${text}" ${Math.round(rect.height)}px (min 44px)` });
+                    }
+                });
+
+                // Deduplicate
+                const seen = new Set();
+                return issues.filter(i => {
+                    const k = i.type + ':' + i.detail;
+                    if (seen.has(k)) return false;
+                    seen.add(k); return true;
+                }).slice(0, 10);
+            }""")
+
+            if found:
+                for issue in found:
+                    icon = {"high": "\U0001f534", "medium": "\U0001f7e1"}.get(issue["severity"], "\u26a0\ufe0f")
+                    issues.append({"device": dev_name, **issue})
+                    print(f"  {icon} {dev_name:<12} {issue['type']:<14} {issue['detail']}")
+            else:
+                print(f"  \u2705 {dev_name:<12} all clear")
+
+            context.close()
+        browser.close()
+
+    high = sum(1 for i in issues if i.get("severity") == "high")
+    med = sum(1 for i in issues if i.get("severity") == "medium")
+    total = len(issues)
+    if total == 0:
+        print(f"\n\u2705 S+ GRADE \u2014 {url} passes all checks")
+    else:
+        grade = "F" if high > 5 else "D" if high > 2 else "C" if high > 0 else "B" if med > 5 else "A" if med > 0 else "S+"
+        print(f"\n{'🔴' if high else '🟡'} Grade {grade} \u2014 {high} high, {med} medium ({total} total)")
+
+    return issues
+
+
+def main():
+    parser = argparse.ArgumentParser(description="lo-eyes \u2014 Visual frontend inspector")
+    sub = parser.add_subparsers(dest="command")
+
+    ss = sub.add_parser("screenshot", aliases=["ss"], help="Viewport screenshot")
+    ss.add_argument("url", default="/", nargs="?")
+    ss.add_argument("--device", "-d", default="all", choices=list(DEVICES.keys()) + ["all"])
+    ss.add_argument("--full-page", "-f", action="store_true")
+
+    sc = sub.add_parser("scan", help="Full-page chunked scan (readable detail)")
+    sc.add_argument("url", default="/", nargs="?")
+    sc.add_argument("--device", "-d", default="iphone-14", choices=list(DEVICES.keys()))
+    sc.add_argument("--overlap", type=int, default=60, help="Overlap between chunks (px)")
+
+    au = sub.add_parser("audit", help="Responsive + a11y audit")
+    au.add_argument("url", default="/", nargs="?")
+
+    rs = sub.add_parser("responsive", aliases=["r"], help="All-device viewport screenshots")
+    rs.add_argument("url", default="/", nargs="?")
+
+    args = parser.parse_args()
+
+    if args.command in ("screenshot", "ss"):
+        screenshot(args.url, args.device, args.full_page)
+    elif args.command == "scan":
+        scan(args.url, args.device, args.overlap)
+    elif args.command == "audit":
+        audit(args.url)
+    elif args.command in ("responsive", "r"):
+        screenshot(args.url, "all", False)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
