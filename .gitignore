@@ -3,3 +3,5 @@ screenshots/
 baselines/
 __pycache__/
 *.pyc
+dist/
+*.egg-info/
