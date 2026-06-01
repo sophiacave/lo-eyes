@@ -1,8 +1,14 @@
 # lo-eyes
 
-Visual frontend inspector MCP server. Screenshots, responsive audits, and S+ grading across mobile and desktop viewports.
+<!-- mcp-name: io.github.sophiacave/lo-eyes -->
 
-Built for [likeone.ai](https://likeone.ai). Works with any site by changing `BASE_URL`.
+[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
+[![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-orange.svg)](https://modelcontextprotocol.io)
+
+**Visual frontend accessibility inspector MCP server.** WCAG contrast checking, touch target validation, heading hierarchy audits, responsive screenshots, and S+ grading across mobile and desktop viewports.
+
+Built by [Like One Foundation](https://likeone.ai) (501(c)(3) nonprofit). Works with any site by changing `BASE_URL`.
 
 ## Tools
 

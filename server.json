@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sophiacave/lo-eyes",
+  "title": "lo-eyes",
+  "description": "Visual frontend accessibility inspector MCP server. WCAG contrast checking, touch target validation, heading hierarchy audits, responsive screenshots, and S+ grading across mobile and desktop viewports.",
+  "repository": {
+    "url": "https://github.com/sophiacave/lo-eyes",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "lo-eyes",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
