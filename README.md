@@ -1,5 +1,8 @@
 # lo-eyes
 
+[![CI](https://github.com/sophiacave/lo-eyes/actions/workflows/ci.yml/badge.svg)](https://github.com/sophiacave/lo-eyes/actions/workflows/ci.yml)
+
+
 <!-- mcp-name: io.github.sophiacave/lo-eyes -->
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://opensource.org/licenses/MIT)
