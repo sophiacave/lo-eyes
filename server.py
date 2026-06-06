@@ -58,7 +58,7 @@ def _url(path: str) -> str:
 
 
 def _run_audit_js():
-    """JavaScript audit code injected into pages. 9 WCAG checks."""
+    """JavaScript audit code injected into pages. 11 WCAG checks."""
     return """() => {
         const vw = window.innerWidth;
         const issues = [];
@@ -228,13 +228,50 @@ def _run_audit_js():
             }
         });
 
+        // 10. Overflow-clip: content clipped by overflow:hidden (WCAG 1.4.10)
+        document.querySelectorAll('*').forEach(el => {
+            const cs = getComputedStyle(el);
+            if (cs.overflowX !== 'hidden') return;
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0) return;
+            for (const child of el.children) {
+                const cr = child.getBoundingClientRect();
+                if (cr.width <= 0) continue;
+                const clippedPx = Math.round(Math.max(0, cr.right - rect.right));
+                if (clippedPx > 10) {
+                    const tag = el.tagName.toLowerCase();
+                    const cls = el.className ? '.' + String(el.className).split(' ')[0] : '';
+                    const childTag = child.tagName.toLowerCase();
+                    issues.push({ type: 'overflow-clip', severity: 'high',
+                        detail: `${childTag} clipped by ${tag}${cls} overflow:hidden (${clippedPx}px hidden)` });
+                    break;
+                }
+            }
+        });
+
+        // 11. ASCII tables in <pre> blocks (WCAG 1.3.1)
+        const tableChars = /[\u2500\u2501\u2502\u250C\u2510\u2514\u2518\u251C\u2524\u252C\u2534\u253C\u2550\u2551\u2554\u2557\u255A\u255D\u2560\u2563\u2566\u2569\u256C]/;
+        const colPat = /\\S+\\s{2,}\\S+\\s{2,}\\S+/;
+        document.querySelectorAll('pre').forEach(el => {
+            const text = el.textContent || '';
+            const lines = text.split('\\n').filter(l => l.trim());
+            if (lines.length < 3) return;
+            const hasBox = tableChars.test(text);
+            const aligned = lines.filter(l => colPat.test(l)).length;
+            if (hasBox || aligned >= 3) {
+                const tag = el.className ? 'pre.' + el.className.split(' ')[0] : 'pre';
+                issues.push({ type: 'pre-table', severity: 'medium',
+                    detail: `${tag} contains tabular data (${lines.length} lines) — convert to <table>` });
+            }
+        });
+
         // Deduplicate
         const seen = new Set();
         return issues.filter(i => {
             const k = i.type + ':' + i.detail;
             if (seen.has(k)) return false;
             seen.add(k); return true;
-        }).slice(0, 25);
+        }).slice(0, 30);
     }"""
 
 
