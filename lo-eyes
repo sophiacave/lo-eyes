@@ -2,10 +2,11 @@
 """lo-eyes — Visual frontend inspector for likeone.ai
 
 Modes:
-  screenshot  — single viewport capture (readable)
+  screenshot  — viewport capture, accepts multiple URLs (one browser launch)
   scan        — auto-chunk full page into viewport-sized pieces (readable + complete)
-  audit       — responsive + a11y checks across all viewports
+  audit       — responsive + a11y checks across all viewports, accepts multiple URLs
   responsive  — viewport screenshots at all 5 devices
+  compare     — pixel-diff a URL against its saved baseline (visual regression)
 """
 
 import argparse
@@ -13,6 +14,7 @@ import sys
 import json
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 VENV = Path(__file__).parent / ".venv"
 if VENV.exists():
@@ -36,8 +38,11 @@ DEVICES = {
 
 
 def _slug(url: str) -> str:
-    path = url if url.startswith("/") else f"/{url.lstrip('/')}"
-    return "home" if path == "/" else path.strip("/").replace("/", "-")
+    if url.startswith(("http://", "https://")):
+        path = urlparse(url).path
+    else:
+        path = url if url.startswith("/") else f"/{url.lstrip('/')}"
+    return "home" if path.strip("/") == "" else path.strip("/").replace("/", "-")
 
 
 def _url(path: str) -> str:
@@ -294,9 +299,10 @@ def scan(url: str, device: str = "iphone-14", overlap: int = 60):
     return str(scan_dir)
 
 
-def screenshot(url: str, device: str = "all", full_page: bool = False):
-    """Single viewport screenshot (or all devices)."""
-    slug = _slug(url)
+def screenshot(urls, device: str = "all", full_page: bool = False):
+    """Viewport screenshots. Accepts one or more URLs — single browser launch."""
+    if isinstance(urls, str):
+        urls = [urls]
     devices_to_use = DEVICES if device == "all" else {device: DEVICES[device]}
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -309,65 +315,149 @@ def screenshot(url: str, device: str = "all", full_page: bool = False):
                 is_mobile=config.get("mobile", False),
             )
             page = context.new_page()
-            page.goto(_url(url), wait_until="networkidle", timeout=15000)
-            page.wait_for_timeout(500)
+            for url in urls:
+                page.goto(_url(url), wait_until="networkidle", timeout=15000)
+                page.wait_for_timeout(500)
 
-            filename = f"{slug}_{dev_name}_{ts}.png"
-            filepath = SCREENSHOT_DIR / filename
-            page.screenshot(path=str(filepath), full_page=full_page)
-            mode = "full-page" if full_page else f"{config['width']}x{config['height']}"
-            print(f"  {dev_name:<12} {mode}  → {filename}")
+                filename = f"{_slug(url)}_{dev_name}_{ts}.png"
+                filepath = SCREENSHOT_DIR / filename
+                page.screenshot(path=str(filepath), full_page=full_page)
+                mode = "full-page" if full_page else f"{config['width']}x{config['height']}"
+                print(f"  {dev_name:<12} {mode}  → {filename}")
             context.close()
         browser.close()
     print(f"\nSaved to {SCREENSHOT_DIR}")
 
 
-def audit(url: str):
-    """Responsive + a11y audit across all viewports."""
-    issues = []
+def audit(urls):
+    """Responsive + a11y audit across all viewports. Accepts one or more URLs."""
+    if isinstance(urls, str):
+        urls = [urls]
+    all_issues = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        for dev_name, config in DEVICES.items():
-            context = browser.new_context(
-                viewport={"width": config["width"], "height": config["height"]},
-                device_scale_factor=1,
-                is_mobile=config.get("mobile", False),
-            )
-            page = context.new_page()
-            page.goto(_url(url), wait_until="networkidle", timeout=15000)
+        for url in urls:
+            if len(urls) > 1:
+                print(f"\n━━ {url}")
+            issues = []
+            for dev_name, config in DEVICES.items():
+                context = browser.new_context(
+                    viewport={"width": config["width"], "height": config["height"]},
+                    device_scale_factor=1,
+                    is_mobile=config.get("mobile", False),
+                )
+                page = context.new_page()
+                page.goto(_url(url), wait_until="networkidle", timeout=15000)
 
-            found = page.evaluate(_audit_js())
+                found = page.evaluate(_audit_js())
 
-            if found:
-                for issue in found:
-                    icon = {"high": "\U0001f534", "medium": "\U0001f7e1"}.get(issue["severity"], "\u26a0\ufe0f")
-                    issues.append({"device": dev_name, **issue})
-                    print(f"  {icon} {dev_name:<12} {issue['type']:<14} {issue['detail']}")
+                if found:
+                    for issue in found:
+                        icon = {"high": "\U0001f534", "medium": "\U0001f7e1"}.get(issue["severity"], "\u26a0\ufe0f")
+                        issues.append({"device": dev_name, **issue})
+                        print(f"  {icon} {dev_name:<12} {issue['type']:<14} {issue['detail']}")
+                else:
+                    print(f"  \u2705 {dev_name:<12} all clear")
+
+                context.close()
+
+            high = sum(1 for i in issues if i.get("severity") == "high")
+            med = sum(1 for i in issues if i.get("severity") == "medium")
+            total = len(issues)
+            if total == 0:
+                print(f"\n\u2705 S+ GRADE \u2014 {url} passes all checks")
             else:
-                print(f"  \u2705 {dev_name:<12} all clear")
-
-            context.close()
+                grade = "F" if high > 5 else "D" if high > 2 else "C" if high > 0 else "B" if med > 5 else "A" if med > 0 else "S+"
+                print(f"\n{'🔴' if high else '🟡'} Grade {grade} \u2014 {high} high, {med} medium ({total} total)")
+            all_issues.extend(issues)
         browser.close()
 
-    high = sum(1 for i in issues if i.get("severity") == "high")
-    med = sum(1 for i in issues if i.get("severity") == "medium")
-    total = len(issues)
-    if total == 0:
-        print(f"\n\u2705 S+ GRADE \u2014 {url} passes all checks")
-    else:
-        grade = "F" if high > 5 else "D" if high > 2 else "C" if high > 0 else "B" if med > 5 else "A" if med > 0 else "S+"
-        print(f"\n{'🔴' if high else '🟡'} Grade {grade} \u2014 {high} high, {med} medium ({total} total)")
+    return all_issues
 
-    return issues
+
+BASELINE_DIR = Path(__file__).parent / "baselines"
+
+
+def compare(url: str, device: str = "laptop", save_baseline: bool = False, threshold: float = 0.5):
+    """Visual regression: pixel-diff a URL against its saved baseline.
+
+    --save-baseline captures/overwrites the baseline.
+    Subsequent runs diff against it: reports % changed pixels and writes
+    a red-highlight diff image when above threshold.
+    """
+    from PIL import Image, ImageChops
+
+    BASELINE_DIR.mkdir(exist_ok=True)
+    slug = _slug(url)
+    config = DEVICES[device]
+    baseline_path = BASELINE_DIR / f"{slug}_{device}.png"
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    current_path = SCREENSHOT_DIR / f"{slug}_{device}_{ts}_compare.png"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": config["width"], "height": config["height"]},
+            device_scale_factor=1,
+            is_mobile=config.get("mobile", False),
+        )
+        page = context.new_page()
+        page.goto(_url(url), wait_until="networkidle", timeout=20000)
+        page.wait_for_timeout(800)
+        target = baseline_path if save_baseline else current_path
+        page.screenshot(path=str(target), full_page=True)
+        context.close()
+        browser.close()
+
+    if save_baseline:
+        print(f"  \U0001f4cc Baseline saved: {baseline_path.name}")
+        return None
+
+    if not baseline_path.exists():
+        print(f"  \u26a0\ufe0f  No baseline for {slug} ({device}). Run with --save-baseline first.")
+        return None
+
+    base = Image.open(baseline_path).convert("RGB")
+    curr = Image.open(current_path).convert("RGB")
+
+    if base.size != curr.size:
+        print(f"  \U0001f4d0 Dimensions changed: {base.size[0]}x{base.size[1]} → {curr.size[0]}x{curr.size[1]}")
+        w = min(base.size[0], curr.size[0])
+        h = min(base.size[1], curr.size[1])
+        base = base.crop((0, 0, w, h))
+        curr = curr.crop((0, 0, w, h))
+
+    diff = ImageChops.difference(base, curr)
+    # changed pixel = any channel differs by more than 16 (anti-alias tolerance)
+    mask = diff.convert("L").point(lambda v: 255 if v > 16 else 0)
+    changed = mask.histogram()[255]
+    total = mask.size[0] * mask.size[1]
+    pct = 100.0 * changed / total if total else 0.0
+
+    if pct <= threshold:
+        print(f"  \u2705 MATCH — {pct:.2f}% pixels changed (threshold {threshold}%)")
+        current_path.unlink(missing_ok=True)
+        return pct
+
+    # red-highlight diff overlay
+    overlay = curr.copy()
+    red = Image.new("RGB", overlay.size, (255, 0, 0))
+    overlay = Image.composite(red, overlay, mask)
+    diff_path = SCREENSHOT_DIR / f"{slug}_{device}_{ts}_diff.png"
+    overlay.save(diff_path)
+    print(f"  \U0001f534 CHANGED — {pct:.2f}% pixels differ (threshold {threshold}%)")
+    print(f"     current: {current_path.name}")
+    print(f"     diff:    {diff_path.name}")
+    return pct
 
 
 def main():
     parser = argparse.ArgumentParser(description="lo-eyes \u2014 Visual frontend inspector")
     sub = parser.add_subparsers(dest="command")
 
-    ss = sub.add_parser("screenshot", aliases=["ss"], help="Viewport screenshot")
-    ss.add_argument("url", default="/", nargs="?")
+    ss = sub.add_parser("screenshot", aliases=["ss"], help="Viewport screenshot (multi-URL)")
+    ss.add_argument("urls", default=["/"], nargs="*")
     ss.add_argument("--device", "-d", default="all", choices=list(DEVICES.keys()) + ["all"])
     ss.add_argument("--full-page", "-f", action="store_true")
 
@@ -376,22 +466,30 @@ def main():
     sc.add_argument("--device", "-d", default="iphone-14", choices=list(DEVICES.keys()))
     sc.add_argument("--overlap", type=int, default=60, help="Overlap between chunks (px)")
 
-    au = sub.add_parser("audit", help="Responsive + a11y audit")
-    au.add_argument("url", default="/", nargs="?")
+    au = sub.add_parser("audit", help="Responsive + a11y audit (multi-URL)")
+    au.add_argument("urls", default=["/"], nargs="*")
 
     rs = sub.add_parser("responsive", aliases=["r"], help="All-device viewport screenshots")
     rs.add_argument("url", default="/", nargs="?")
 
+    cp = sub.add_parser("compare", aliases=["diff"], help="Visual regression vs saved baseline")
+    cp.add_argument("url", default="/", nargs="?")
+    cp.add_argument("--device", "-d", default="laptop", choices=list(DEVICES.keys()))
+    cp.add_argument("--save-baseline", "-b", action="store_true", help="Capture/overwrite baseline")
+    cp.add_argument("--threshold", "-t", type=float, default=0.5, help="Max %% changed pixels (default 0.5)")
+
     args = parser.parse_args()
 
     if args.command in ("screenshot", "ss"):
-        screenshot(args.url, args.device, args.full_page)
+        screenshot(args.urls or ["/"], args.device, args.full_page)
     elif args.command == "scan":
         scan(args.url, args.device, args.overlap)
     elif args.command == "audit":
-        audit(args.url)
+        audit(args.urls or ["/"])
     elif args.command in ("responsive", "r"):
         screenshot(args.url, "all", False)
+    elif args.command in ("compare", "diff"):
+        compare(args.url, args.device, args.save_baseline, args.threshold)
     else:
         parser.print_help()
 
