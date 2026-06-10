@@ -4,6 +4,7 @@ Tools:
   eyes_screenshot  -- viewport screenshot at any device preset
   eyes_scan        -- auto-chunk full page into readable pieces
   eyes_audit       -- responsive + a11y audit across all viewports
+  eyes_compare     -- visual regression: pixel-diff vs saved baseline
   eyes_devices     -- list available device presets
 """
 
@@ -12,6 +13,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 
@@ -20,6 +22,7 @@ mcp = FastMCP("lo-eyes")
 BASE_URL = os.environ.get("LO_EYES_BASE_URL", "")
 SCREENSHOT_DIR = Path(os.environ.get("LO_EYES_SCREENSHOT_DIR", "./screenshots"))
 SCREENSHOT_DIR.mkdir(exist_ok=True)
+BASELINE_DIR = Path(os.environ.get("LO_EYES_BASELINE_DIR", "./baselines"))
 
 DEVICES = {
     "iphone-se": {"width": 375, "height": 667, "scale": 1, "mobile": True},
@@ -36,8 +39,11 @@ def _get_playwright():
 
 
 def _slug(url: str) -> str:
-    path = url if url.startswith("/") else f"/{url.lstrip('/')}"
-    return "home" if path == "/" else path.strip("/").replace("/", "-")
+    if url.startswith(("http://", "https://")):
+        path = urlparse(url).path
+    else:
+        path = url if url.startswith("/") else f"/{url.lstrip('/')}"
+    return "home" if path.strip("/") == "" else path.strip("/").replace("/", "-")
 
 
 def _url(path: str) -> str:
@@ -422,6 +428,102 @@ def eyes_audit(
         "issues": all_issues,
         "devices_checked": list(device_list),
     }
+
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def eyes_compare(
+    url: str = "/",
+    device: str = "laptop",
+    save_baseline: bool = False,
+    threshold: float = 0.5,
+) -> str:
+    """Visual regression: pixel-diff a page against its saved baseline.
+
+    First call with save_baseline=true to capture a baseline. Later calls
+    capture the page again and report the percentage of changed pixels
+    (anti-alias tolerant). Above threshold, writes a red-highlight diff
+    image showing exactly what changed.
+
+    Args:
+        url: Full URL or path to compare
+        device: Device preset -- iphone-se, iphone-14, ipad, laptop, desktop
+        save_baseline: Capture/overwrite the baseline instead of comparing
+        threshold: Max percent of changed pixels considered a match (default 0.5)
+    """
+    if device not in DEVICES:
+        return f"Unknown device '{device}'. Choose: {', '.join(DEVICES.keys())}"
+    try:
+        from PIL import Image, ImageChops
+    except ImportError:
+        return json.dumps({"status": "error", "error": "Pillow not installed (pip install pillow)"})
+
+    BASELINE_DIR.mkdir(parents=True, exist_ok=True)
+    config = DEVICES[device]
+    slug = _slug(url)
+    baseline_path = BASELINE_DIR / f"{slug}_{device}.png"
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    current_path = SCREENSHOT_DIR / f"{slug}_{device}_{ts}_compare.png"
+
+    sync_pw = _get_playwright()
+    with sync_pw() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": config["width"], "height": config["height"]},
+            device_scale_factor=1,
+            is_mobile=config.get("mobile", False),
+        )
+        page = context.new_page()
+        page.goto(_url(url), wait_until="networkidle", timeout=20000)
+        page.wait_for_timeout(800)
+        target = baseline_path if save_baseline else current_path
+        page.screenshot(path=str(target), full_page=True)
+        context.close()
+        browser.close()
+
+    if save_baseline:
+        return json.dumps({"status": "baseline_saved", "baseline": str(baseline_path), "url": url, "device": device})
+
+    if not baseline_path.exists():
+        return json.dumps({"status": "no_baseline", "hint": f"Run eyes_compare with save_baseline=true first", "expected": str(baseline_path)})
+
+    base = Image.open(baseline_path).convert("RGB")
+    curr = Image.open(current_path).convert("RGB")
+
+    dimensions_changed = base.size != curr.size
+    if dimensions_changed:
+        w, h = min(base.size[0], curr.size[0]), min(base.size[1], curr.size[1])
+        base, curr = base.crop((0, 0, w, h)), curr.crop((0, 0, w, h))
+
+    diff = ImageChops.difference(base, curr)
+    # changed pixel = any channel differs by more than 16 (anti-alias tolerance)
+    mask = diff.convert("L").point(lambda v: 255 if v > 16 else 0)
+    changed = mask.histogram()[255]
+    total = mask.size[0] * mask.size[1]
+    pct = 100.0 * changed / total if total else 0.0
+
+    result = {
+        "url": url,
+        "device": device,
+        "changed_pixels_pct": round(pct, 2),
+        "threshold_pct": threshold,
+        "dimensions_changed": dimensions_changed,
+        "baseline": str(baseline_path),
+    }
+
+    if pct <= threshold:
+        result["status"] = "match"
+        current_path.unlink(missing_ok=True)
+    else:
+        overlay = curr.copy()
+        red = Image.new("RGB", overlay.size, (255, 0, 0))
+        overlay = Image.composite(red, overlay, mask)
+        diff_path = SCREENSHOT_DIR / f"{slug}_{device}_{ts}_diff.png"
+        overlay.save(diff_path)
+        result["status"] = "changed"
+        result["current"] = str(current_path)
+        result["diff_image"] = str(diff_path)
 
     return json.dumps(result, indent=2)
 
